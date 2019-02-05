@@ -1,0 +1,311 @@
+---
+44title: "Untitled"
+author: "THIBAUT SAAH"
+date: "3 février 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## file path of corpora
+```{r}
+filePath <- file.path(".", "en_US")
+filePath
+```
+
+
+
+
+## Import library for text mining
+
+```{r echo=FALSE, warning=FALSE}
+suppressPackageStartupMessages(library(quanteda))
+suppressPackageStartupMessages(library(readtext))
+suppressPackageStartupMessages(library(spacyr))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(stringi))
+suppressPackageStartupMessages(library(tm))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(ggplot2))
+```
+
+
+
+```{r}
+# read line by line and display the first lines
+con1 <- file("./en_US/en_US.blogs.txt", "r")
+blogs <- readLines(con1)
+```
+
+## News
+
+
+```{r}
+# read line by line and display the first lines
+con2 <- file("./en_US/en_US.news.txt", "r")
+news <- readLines(con2)
+```
+### Twitter
+
+```{r}
+# read line by line and display the first lines
+con3 <- file("./en_US/en_US.twitter.txt", "r")
+twitter <- readLines(con3)
+```
+
+
+
+```{r}
+sampleHolderTwitter <- sample(length(twitter), length(twitter) * 0.1)
+sampleHolderBlog <- sample(length(blogs), length(blogs) * 0.1)
+sampleHolderNews <- sample(length(news), length(news) * 0.1)
+
+US_Twitter_Sample <- twitter[sampleHolderTwitter]
+US_Blogs_Sample <- blogs[sampleHolderBlog]
+US_News_Sample <- news[sampleHolderNews]
+```
+
+
+
+```{r}
+master_vector <- c(US_Twitter_Sample, US_Blogs_Sample, US_News_Sample)
+corp <- corpus(master_vector)
+```
+
+
+```{r}
+master_Tokens <- tokens(
+    x = tolower(corp),
+    remove_punct = TRUE,
+    remove_twitter = TRUE,
+    remove_numbers = TRUE,
+    remove_hyphens = TRUE,
+    remove_symbols = TRUE,
+    remove_url = TRUE
+)
+```
+
+
+
+```{r}
+rm(corp)
+```
+
+
+```{r}
+stemed_words <- tokens_wordstem(master_Tokens, language = "english")
+```
+
+
+
+```{r}
+bi_gram <- tokens_ngrams(stemed_words, n = 2)
+tri_gram <- tokens_ngrams(stemed_words, n = 3)
+
+uni_DFM <- dfm(stemed_words)
+bi_DFM <- dfm(bi_gram)
+tri_DFM <- dfm(tri_gram)
+```
+
+
+
+
+```{r}
+uni_DFM <- dfm_trim(uni_DFM, 3)
+bi_DFM <- dfm_trim(bi_DFM, 3)
+tri_DFM <- dfm_trim(tri_DFM, 3)
+```
+
+
+```{r}
+# Create named vectors with counts of words 
+sums_U <- colSums(uni_DFM)
+sums_B <- colSums(bi_DFM)
+sums_T <- colSums(tri_DFM)
+
+
+# Requires packages
+
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(ggplot2))
+
+# Create data tables with individual words as columns
+uni_words <- data.table(word_1 = names(sums_U), count = sums_U)
+
+bi_words <- data.table(
+        word_1 = sapply(strsplit(names(sums_B), "_", fixed = TRUE), '[[', 1),
+        word_2 = sapply(strsplit(names(sums_B), "_", fixed = TRUE), '[[', 2),
+        count = sums_B)
+
+tri_words <- data.table(
+        word_1 = sapply(strsplit(names(sums_T), "_", fixed = TRUE), '[[', 1),
+        word_2 = sapply(strsplit(names(sums_T), "_", fixed = TRUE), '[[', 2),
+        word_3 = sapply(strsplit(names(sums_T), "_", fixed = TRUE), '[[', 3),
+        count = sums_T)
+```
+
+```{r}
+rm(tri_DFM)
+rm(blogs)
+rm(twitter)
+rm(news)
+rm(uni_DFM)
+rm(bi_DFM)
+```
+
+
+
+```{r}
+setkey(uni_words, word_1)
+setkey(bi_words, word_1, word_2)
+setkey(tri_words, word_1, word_2, word_3)
+```
+
+
+Let's add Kneser-Kney smoothing to the dataset. First we will find bi-gram probabilities and then add smoothing.
+
+```{r}
+discount_value <- 0.75
+
+######## Finding Bi-Gram Probability #################
+
+# Finding number of bi-gram words
+numOfBiGrams <- nrow(bi_words[by = .(word_1, word_2)])
+
+# Dividing number of times word 2 occurs as second part of bigram, by total number of bigrams.  
+# ( Finding probability for a word given the number of times it was second word of a bigram)
+ckn <- bi_words[, .(Prob = ((.N) / numOfBiGrams)), by = word_2]
+setkey(ckn, word_2)
+
+# Assigning the probabilities as second word of bigram, to unigrams
+uni_words[, Prob := ckn[word_1, Prob]]
+uni_words <- uni_words[!is.na(uni_words$Prob)]
+
+# Finding number of times word 1 occurred as word 1 of bi-grams
+n1wi <- bi_words[, .(N = .N), by = word_1]
+setkey(n1wi, word_1)
+
+# Assigning total times word 1 occured to bigram cn1
+bi_words[, Cn1 := uni_words[word_1, count]]
+
+# Kneser Kney Algorithm
+bi_words[, Prob := ((count - discount_value) / Cn1 + discount_value / Cn1 * n1wi[word_1, N] * uni_words[word_2, Prob])]
+
+######## End of Finding Bi-Gram Probability #################
+```
+
+
+Then let's find tri-gram probabilities and add smoothing.
+
+```{r}
+######## Finding Tri-Gram Probability #################
+
+# Finding count of word1-word2 combination in bigram 
+tri_words[, Cn2 := bi_words[.(word_1, word_2), count]]
+
+# Finding count of word1-word2 combination in trigram
+n1w12 <- tri_words[, .N, by = .(word_1, word_2)]
+setkey(n1w12, word_1, word_2)
+
+# Kneser Kney Algorithm
+tri_words[, Prob := (count - discount_value) / Cn2 + discount_value / Cn2 * n1w12[.(word_1, word_2), N] *
+              bi_words[.(word_1, word_2), Prob]]
+
+######## End of Finding Tri-Gram Probability #################
+```
+
+
+Finally let's tweak the unigram to be used more effectively. Here we single out 50 most occurring unigrams as it is more likely to occur. This will be used as the last resort in backing-off.
+
+
+```{r}
+# Finding the most frequently used 50 unigrmas
+uni_words <- uni_words[order(-Prob)][1:50]
+```
+
+
+
+With that, we have found, the word probabilities for the words in the dataset. Now let's create few functions to build the prediction app.
+
+
+
+
+## The Prediction App
+
+First the function to predict the third word, given two previous words.
+
+
+```{r}
+# function to return highly probable previous word given two successive words
+triWords <- function(w1, w2, n = 5) {
+    pwords <- tri_words[.(w1, w2)][order(-Prob)]
+    if (any(is.na(pwords)))
+        return(biWords(w2, n))
+    if (nrow(pwords) > n)
+        return(pwords[1:n, word_3])
+    count <- nrow(pwords)
+    bwords <- biWords(w2, n)[1:(n - count)]
+    return(c(pwords[, word_3], bwords))
+}
+```
+
+
+If we don't find a tri-gram with the two given words, we backoff to the bi-gram. We find the next word given one previous word.
+
+
+
+```{r}
+# function to return highly probable previous word given a word
+biWords <- function(w1, n = 5) {
+    pwords <- bi_words[w1][order(-Prob)]
+    if (any(is.na(pwords)))
+        return(uniWords(n))
+    if (nrow(pwords) > n)
+        return(pwords[1:n, word_2])
+    count <- nrow(pwords)
+    unWords <- uniWords(n)[1:(n - count)]
+    return(c(pwords[, word_2], unWords))
+}
+```
+
+If we couldn't even find the corresponding bigram, we randomly get a word from unigrams with high probability. This is the last resort for n-grams that are not found in the dataset.
+
+
+```{r}
+# function to return random words from unigrams
+uniWords <- function(n = 5) {  
+    return(sample(uni_words[, word_1], size = n))
+}
+```
+
+
+Finally, a function to bind all these,
+
+```{r}
+# The prediction app
+getWords <- function(str){
+    require(quanteda)
+    tokens <- tokens(x = char_tolower(str))
+    tokens <- char_wordstem(rev(rev(tokens[[1]])[1:2]), language = "english")
+    
+    words <- triWords(tokens[1], tokens[2], 5)
+    chain_1 <- paste(tokens[1], tokens[2], words[1], sep = " ")
+
+    print(words)
+}
+```
+
+
+
+```{r}
+getWords("Shall we go to")
+
+
+getWords(getWords("Shall we go to"))
+
+
+getWords(getWords(getWords("Shall we go to")))
+
+```
